@@ -16,8 +16,18 @@ if (!defined('ABSPATH')) {
 		<tr>
 			<th>File format:</th>
 			<td>
-				<label><input type="radio" name="imp_format" id="imp_format_csv" value="csv" checked="checked" /> CSV in Events Manager Import/Export format</label><br />
-				<label><input type="radio" name="imp_format" id="imp_format_xcal" value="xCal" /> xCal / Events Manager</label>
+				<label><input type="radio" name="imp_format" id="imp_format_xcal" value="xCal" checked="checked" /> xCal / Events Manager</label>
+				<br />
+				<label><input type="radio" name="imp_format" id="imp_format_csv" value="csv" /> CSV in Events Manager Import/Export format</label>
+			</td>
+		</tr>
+
+		<tr>
+			<th>Detecting duplicates:</th>
+			<td>
+				<label><input type="checkbox" name="imp_usepguid" id="imp_usepguid" value="1" checked="checked" /> Use the event post GUID to de-duplicate events</label><br/>
+				<small>If unchecked, a custom event attribute <em>em_impexp_uid</em> is used to detect duplicates. This may not work for some installations. <br/> 
+				If checked, the imported event <em>uid</em> will be saved as the GUID for a new event post, and subsequent imports will check whether an event post with the same GUID already exists, and if so update it.</small>
 			</td>
 		</tr>
 

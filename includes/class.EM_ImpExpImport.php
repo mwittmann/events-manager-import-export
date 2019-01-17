@@ -9,6 +9,7 @@ class EM_ImpExpImport {
 
 	protected $plugin;
 	protected $menuPage;
+	protected $dedupWithGuid = false;
 
 	/**
 	* @param EM_ImpExpPlugin $plugin handle to the plugin object
@@ -27,6 +28,7 @@ class EM_ImpExpImport {
 		$format = self::getPostValue('imp_format');
 
 		if (self::isFormPost() && $action === 'em_impexp_import') {
+			$this->dedupWithGuid = self::getPostValue('imp_usepguid') === "1";
 			$this->importEvents($format);
 		}
 
@@ -109,6 +111,9 @@ class EM_ImpExpImport {
 		$haveRecord = false;
 		$haveLocation = false;
 		$records = 0;
+		$updated = 0;
+		$skipped = 0;
+		$orphaned = 0;
 		$attrs = array();
 		$eventCategories = self::getEventCategories();
 		$eventCountries = self::getEventCountries();
@@ -177,17 +182,40 @@ class EM_ImpExpImport {
 									self::maybeSetCoordinates($location);
 									$location->save();
 									//force reload of locations
-									$this->locations = false; 									
+									$this->locations = false;
 								}
 							}
 
 							// try to find existing event with matching unique ID first, so can update it
 							$event = false;
-							if ($data['uid']) {
+							$isNewEvent = false;
+							$uid = $data['uid'];
+							if ($uid && $this->dedupWithGuid) {
+								// seems like WordPress wants guids to start w/ http or https
+								if (strpos($uid, "http") !== 0) $uid = "http://" . $uid; 
+								$post = $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM $wpdb->posts p WHERE p.guid=%s AND p.post_type='event' ORDER BY p.ID DESC LIMIT 1", $uid ) );
+								if ($post) {
+									$postarray = get_post((int) $post, ARRAY_A);
+									if ($postarray['post_status']==='trash') {
+										# skip trashed events matching this guid!
+										$skipped++;
+										break;
+									}
+									$event = EM_Events::get(array('post_id' => $post));
+									$event = empty($event[0]) ? false : $event[0];
+									if (!$event) {
+										# This shouldn't happen... missing the matching
+										# event for a post with a matching GUID!
+										# Skip this import. We don't want duplicate GUIDs.
+										$orphaned++;
+										break;
+									}
+								}
+							} else if ($uid) {
 								add_filter('em_events_get_default_search', array(__CLASS__, 'filterEventArgs'), 10, 2);
 								add_filter('em_events_build_sql_conditions', array(__CLASS__, 'filterEventSQL'), 10, 2);
 
-								$event = EM_Events::get(array('em_impexp_uid' => $data['uid']));
+								$event = EM_Events::get(array('em_impexp_uid' => $uid));
 								$event = empty($event[0]) ? false : $event[0];
 
 								remove_filter('em_events_get_default_search', array(__CLASS__, 'filterEventArgs'), 10, 2);
@@ -196,10 +224,11 @@ class EM_ImpExpImport {
 							if (!$event) {
 								// must create a new event
 								$event = new EM_Event();
+								$isNewEvent = true;
 							}
-							//$event->post_id = $data['uid'];	// post_id is now NOT NULL - removed since using uid is not working as expected -> created duplicate entries in table
+							//$event->post_id = $uid;	// post_id is now NOT NULL - removed since using uid is not working as expected -> created duplicate entries in table
 							$event->location_id = $location ? $location->location_id : 0;
-							$event->event_attributes['em_impexp_uid'] = $data['uid'];
+							$event->event_attributes['em_impexp_uid'] = $uid;
 							$event->event_attributes['em_impexp_url'] = $data['url'];
 							$event->event_name = $data['summary'];
 							$event->post_content = $data['x-post_content'];
@@ -243,6 +272,15 @@ class EM_ImpExpImport {
 							if ($event) {
 								$event->save();
 								$event->save_meta();
+								if ($isNewEvent && $this->dedupWithGuid && $uid) {
+									// crude, brute-force update of GUID
+									// WordPress functions don't allow GUID update
+									// except when post is first created
+									$wpdb->update( 
+										$wpdb->prefix . 'posts', // table 
+										array('guid' => $uid), 
+										array('ID' => $event->post_id), null, '%d');
+								}
 
 								if ($data['categories']) {
 									$categories = explode(',', $data['categories']);
@@ -268,7 +306,8 @@ class EM_ImpExpImport {
 								}
 							}
 
-							$records++;
+							if ($isNewEvent) $records++;
+							else $updated++;
 						}
 						$haveRecord = false;
 						$haveLocation = false;
@@ -324,7 +363,11 @@ class EM_ImpExpImport {
 			}
 		}
 
-		$this->plugin->showMessage($records === 1 ? '1 events loaded' : "$records events loaded");
+		$this->plugin->showMessage(($records === 1 ? '1 event added. ' : "$records events added. ") 
+			. ($updated === 1 ? '1 event updated. ' : "$updated events updated. ")
+			. ($skipped > 0 ? ($skipped === 1 ? '1 trashed event skipped. ' : "$skipped trashed events skipped. ") : "")
+			. ($orphaned > 0 ? ($orphaned === 1 ? '1 orphaned event skipped. ' : "$skipped orphaned events skipped. ") : "")
+			);
 	}
 
 	/**
@@ -357,6 +400,9 @@ class EM_ImpExpImport {
 		$wpdb->query('start transaction');
 
 		$records = 0;
+		$updated = 0;
+		$skipped = 0;
+		$orphaned = 0;
 		$rows = 0;
 		$attrs = array();
 		$eventCategories = self::getEventCategories();
@@ -449,11 +495,34 @@ class EM_ImpExpImport {
 
 				// try to find existing event with matching unique ID first, so can update it
 				$event = false;
-				if ($data['uid']) {
+				$isNewEvent = false;
+				$uid = $data['uid'];
+				if ($uid && $this->dedupWithGuid) {
+					// seems like WordPress wants guids to start w/ http or https
+					if (strpos($uid, "http") !== 0) $uid = "http://" . $uid; 
+					$post = $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM $wpdb->posts p WHERE p.guid=%s AND p.post_type='event' ORDER BY p.ID DESC LIMIT 1", $uid ) );
+					if ($post) {
+						$postarray = get_post((int) $post, ARRAY_A);
+						if ($postarray['post_status']==='trash') {
+							# skip trashed events matching this guid!
+							$skipped++;
+							break;
+						}
+						$event = EM_Events::get(array('post_id' => $post));
+						$event = empty($event[0]) ? false : $event[0];
+						if (!$event) {
+							# This shouldn't happen... missing the matching
+							# event for a post with a matching GUID!
+							# Skip this import. We don't want duplicate GUIDs.
+							$orphaned++;
+							break;
+						}
+					}
+				} else if ($uid) {
 					add_filter('em_events_get_default_search', array(__CLASS__, 'filterEventArgs'), 10, 2);
 					add_filter('em_events_build_sql_conditions', array(__CLASS__, 'filterEventSQL'), 10, 2);
 
-					$event = EM_Events::get(array('em_impexp_uid' => $data['uid']));
+					$event = EM_Events::get(array('em_impexp_uid' => $uid));
 					$event = count($event) > 0 ? $event[0] : false;
 
 					remove_filter('em_events_get_default_search', array(__CLASS__, 'filterEventArgs'), 10, 2);
@@ -462,10 +531,11 @@ class EM_ImpExpImport {
 				if (!$event) {
 					// must create a new event
 					$event = new EM_Event();
+					$isNewEvent = true;
 				}
-				//$event->post_id = $data['uid']; // post_id is now NOT NULL - removed since using uid is not working as expected -> created duplicate entries in table
+				//$event->post_id = $uid; // post_id is now NOT NULL - removed since using uid is not working as expected -> created duplicate entries in table
 				$event->location_id = $location ? $location->location_id : 0;
-				$event->event_attributes['em_impexp_uid'] = $data['uid'];
+				$event->event_attributes['em_impexp_uid'] = $uid;
 				$event->event_attributes['em_impexp_url'] = $data['url'];
 				$event->event_name = $data['summary'];
 				$event->post_content = $data['post_content'];
@@ -523,6 +593,15 @@ class EM_ImpExpImport {
 				if ($event) {
 					$event->save();
 					$event->save_meta();
+					if ($isNewEvent && $this->dedupWithGuid && $uid) {
+						// crude, brute-force update of GUID
+						// WordPress functions don't allow GUID update
+						// except when post is first created
+						$wpdb->update( 
+							$wpdb->prefix . 'posts', // table 
+							array('guid' => $uid), 
+							array('ID' => $event->post_id), null, '%d');
+					}
 
 					if ($data['categories']) {
 						$categories = explode(',', $data['categories']);
@@ -548,13 +627,18 @@ class EM_ImpExpImport {
 					}
 				}
 
-				$records++;
+				if ($isNewEvent) $records++;
+				else $updated++;
 			}
 		}
 
 		$wpdb->query('commit');
 
-		$this->plugin->showMessage($records === 1 ? '1 events loaded' : "$records events loaded");
+		$this->plugin->showMessage(($records === 1 ? '1 event added. ' : "$records events added. ") 
+			. ($updated === 1 ? '1 event updated. ' : "$updated events updated. ")
+			. ($skipped > 0 ? ($skipped === 1 ? '1 trashed event skipped. ' : "$skipped trashed events skipped. ") : "")
+			. ($orphaned > 0 ? ($orphaned === 1 ? '1 orphaned event skipped. ' : "$skipped orphaned events skipped. ") : "")
+			);
 	}
 
 	/**
